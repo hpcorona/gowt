@@ -6,9 +6,6 @@ import "fmt"
 import "strconv"
 import "reflect"
 import "time"
-import "encoding/base64"
-import "encoding/binary"
-import "bytes"
 
 func GwtParse(reg *Registry, strtable, payload []string, partype string, idxv int) (interface{}, int, os.Error) {
 	idxp := strings.Index(partype, "/")
@@ -16,12 +13,38 @@ func GwtParse(reg *Registry, strtable, payload []string, partype string, idxv in
 		partype = partype[0:idxp]
 	}
 	
+	isarray := false
+	if partype[0] == '[' {
+		isarray = true
+		partype = partype[1:]
+	}
+	
 	equiv := reg.Data[partype]
 	if equiv == nil {
 		return nil, 1, os.NewError(fmt.Sprintf("Invalid type: %s\n", partype))
 	}
 	
-	return equiv.Parser(reg, strtable, payload, partype, idxv)
+	if isarray == false {
+		return equiv.Parser(reg, strtable, payload, partype, idxv)
+	}
+	
+	idxvp := idxv + 2
+	total := ToInt(payload[idxv + 1])
+	
+	arr := reflect.MakeSlice(reflect.TypeOf([]interface{} {}), 0, total)
+	
+	for i := 0; i < total; i++ {
+		v, adv, err := equiv.Parser(reg, strtable, payload, partype, idxvp)
+		if err != nil {
+			return nil, idxvp - idxv, err
+		}
+		
+		arr = reflect.Append(arr, reflect.ValueOf(v))
+		
+		idxvp += adv
+	}
+	
+	return arr, idxvp - idxv, nil
 }
 
 func GwtInt(reg *Registry, strtable, payload []string, partype string, idxv int) (interface{}, int, os.Error) {
@@ -33,8 +56,26 @@ func GwtInt(reg *Registry, strtable, payload []string, partype string, idxv int)
 	return v, 1, nil
 }
 
+func GwtLong(reg *Registry, strtable, payload []string, partype string, idxv int) (interface{}, int, os.Error) {
+	v, err := ToLong(payload[idxv])
+	if err != nil {
+		return nil, 1, err
+	}
+	
+	return v, 1, nil
+}
+
 func GwtFloat(reg *Registry, strtable, payload []string, partype string, idxv int) (interface{}, int, os.Error) {
 	v, err := strconv.Atof32(payload[idxv])
+	if err != nil {
+		return nil, 1, err
+	}
+	
+	return v, 1, nil
+}
+
+func GwtDouble(reg *Registry, strtable, payload []string, partype string, idxv int) (interface{}, int, os.Error) {
+	v, err := strconv.Atof64(payload[idxv])
 	if err != nil {
 		return nil, 1, err
 	}
@@ -70,18 +111,16 @@ func GwtString(reg *Registry, strtable, payload []string, partype string, idxv i
 
 func GwtDate(reg *Registry, strtable, payload []string, partype string, idxv int) (interface{}, int, os.Error) {
 	vb64 := payload[idxv + 1]
-	datab, err := base64.StdEncoding.DecodeString(vb64)
+	datab, err := ToLong(vb64)
 	if err != nil {
-		return nil, 1, os.NewError(fmt.Sprintf("Error parsing a date: %s", err.String()))
+		return nil, 2, err
 	}
 	
-	data := bytes.NewBuffer(datab)
+	//milli := datab % 1000 (maybe when GAE supports Nanoseconds)
+	datab = datab / 1000
+	t := time.SecondsToLocalTime(datab)
 	
-	var vint [1]int64
-	binary.Read(data, binary.BigEndian, vint)
-	t := time.SecondsToLocalTime(vint[0])
-	
-	return t,2,nil
+	return t, 2, nil
 }
 
 func GwtArray(reg *Registry, strtable, payload []string, partype string, idxv int) (interface{}, int, os.Error) {
@@ -132,6 +171,10 @@ func GwtObject(reg *Registry, strtable, payload []string, partype string, idxv i
 		parser := equivf.Parser
 		if parser == nil {
 			return nil, 1, os.NewError(fmt.Sprintf("Cannot find parser for type %s", ftype.Kind().String()))
+		}
+		
+		if ToInt(payload[idxvp]) == 0 {
+			return nil, 1, nil
 		}
 		
 		pvalue, adv, err := parser(reg, strtable, payload, equivf.JavaType, idxvp)
